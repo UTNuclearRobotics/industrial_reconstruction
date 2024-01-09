@@ -16,6 +16,7 @@ import sys
 import cv2
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
 from tf2_ros.buffer import Buffer
 from tf2_ros import TransformListener
 import open3d as o3d
@@ -139,6 +140,9 @@ class IndustrialReconstruction(Node):
                                                self.stopReconstructionCallback)
 
         self.tsdf_volume_pub = self.create_publisher(Marker, "tsdf_volume", 10)
+
+        reconstruct_frequency = 50.0
+        self.reconstruction_timer = self.create_timer(1/reconstruct_frequency, self.reconstructCallback)
 
     def archiveData(self, path_output):
         path_depth = join(path_output, "depth")
@@ -284,74 +288,84 @@ class IndustrialReconstruction(Node):
         return res
 
     def cameraCallback(self, depth_image_msg, rgb_image_msg):
-        if self.record:
-            try:
-                # Convert your ROS Image message to OpenCV2
-                # TODO: Generalize image type
-                cv2_depth_img = self.bridge.imgmsg_to_cv2(depth_image_msg, "16UC1")
-                cv2_rgb_img = self.bridge.imgmsg_to_cv2(rgb_image_msg, rgb_image_msg.encoding)
-                # TODO: Test this if statement
-                # if len(cv2_rgb_img.shape) == 2 and cv2_rgb_img.dtype is np.uint8:
-                cv2_rgb_img = cv2.cvtColor(cv2_rgb_img, cv2.COLOR_GRAY2RGB)
-            except CvBridgeError:
-                self.get_logger().error("Error converting ros msg to cv img")
-                return
-            else:
-                self.sensor_data.append(
-                    [o3d.geometry.Image(cv2_depth_img), o3d.geometry.Image(cv2_rgb_img), rgb_image_msg.header.stamp])
-                if (self.frame_count > 30):
-                    data = self.sensor_data.popleft()
-                    try:
-                        gm_tf_stamped = self.buffer.lookup_transform(self.relative_frame, self.tracking_frame, data[2])
-                    except Exception as e:
-                        self.get_logger().error("Failed to get transform: " + str(e))
+        if not self.record: return
 
-                        return
-                    rgb_t, rgb_r = transformStampedToVectors(gm_tf_stamped)
-                    rgb_r_quat = Quaternion(rgb_r)
+        # Convert your ROS Image message to OpenCV2
+        try:
+            # TODO: Generalize image type
+            cv2_depth_img = self.bridge.imgmsg_to_cv2(depth_image_msg, "16UC1")
+            cv2_rgb_img = self.bridge.imgmsg_to_cv2(rgb_image_msg, rgb_image_msg.encoding)
+            # TODO: Test this if statement
+            # if len(cv2_rgb_img.shape) == 2 and cv2_rgb_img.dtype is np.uint8:
+            cv2_rgb_img = cv2.cvtColor(cv2_rgb_img, cv2.COLOR_GRAY2RGB)
 
-                    tran_dist = np.linalg.norm(rgb_t - self.prev_pose_tran)
-                    rot_dist = Quaternion.absolute_distance(Quaternion(self.prev_pose_rot), rgb_r_quat)
+        except CvBridgeError as e:
+            self.get_logger().error(f"Error converting ros msg to cv img: {e}")
+            return
+        
+        # Get the pose of the camera when this image was taken
+        try:
+            gm_tf_stamped = self.buffer.lookup_transform( # TODO: Why not invert the transform here?
+                self.relative_frame, self.tracking_frame, rgb_image_msg.header.stamp, Duration(seconds=1.0)
+            )
+        except Exception as e:
+            self.get_logger().error(f"Failed to get transform: {e}")
+            return
+        
+        # Record the images along with their pose
+        self.sensor_data.append([o3d.geometry.Image(cv2_depth_img), o3d.geometry.Image(cv2_rgb_img), gm_tf_stamped])
+        self.frame_count += 1
+        
+    def reconstructCallback(self):
+        if (self.frame_count <= 30): return # TODO: Evaluate necessity of this line
 
-                    # TODO: Testing if this is a good practice, min jump to accept data
-                    if (tran_dist >= self.translation_distance) or (rot_dist >= self.rotational_distance):
-                        self.prev_pose_tran = rgb_t
-                        self.prev_pose_rot = rgb_r
-                        rgb_pose = rgb_r_quat.transformation_matrix
-                        rgb_pose[0, 3] = rgb_t[0]
-                        rgb_pose[1, 3] = rgb_t[1]
-                        rgb_pose[2, 3] = rgb_t[2]
+        depth_img, rgb_img, gm_tf_stamped = self.sensor_data.popleft()
+        rgb_t, rgb_r = transformStampedToVectors(gm_tf_stamped)
+        rgb_r_quat = Quaternion(rgb_r)
 
-                        self.depth_images.append(data[0])
-                        self.color_images.append(data[1])
-                        self.rgb_poses.append(rgb_pose)
-                        if self.live_integration and self.tsdf_volume is not None:
-                            self.integration_done = False
-                            try:
-                                rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(data[1], data[0], self.depth_scale,
-                                                                                          self.depth_trunc, False)
-                                self.tsdf_volume.integrate(rgbd, self.intrinsics, np.linalg.inv(rgb_pose))
-                                self.integration_done = True
-                                self.processed_frame_count += 1
-                                if self.processed_frame_count % 50 == 0:
-                                    mesh = self.tsdf_volume.extract_triangle_mesh()
-                                    if self.crop_mesh:
-                                        cropped_mesh = mesh.crop(self.crop_box)
-                                    else:
-                                        cropped_mesh = mesh
-                                    mesh_msg = meshToRos(cropped_mesh)
-                                    mesh_msg.header.stamp = self.get_clock().now().to_msg()
-                                    mesh_msg.header.frame_id = self.relative_frame
-                                    self.mesh_pub.publish(mesh_msg)
-                            except Exception as e:
-                                self.get_logger().error(f"Error processing images into tsdf: {e}")
-                                self.integration_done = True
-                                return
+        tran_dist = np.linalg.norm(rgb_t - self.prev_pose_tran)
+        rot_dist = Quaternion.absolute_distance(Quaternion(self.prev_pose_rot), rgb_r_quat)
+
+        # TODO: Testing if this is a good practice, min jump to accept data
+        if (tran_dist >= self.translation_distance) or (rot_dist >= self.rotational_distance):
+            self.prev_pose_tran = rgb_t
+            self.prev_pose_rot = rgb_r
+            rgb_pose = rgb_r_quat.transformation_matrix
+            rgb_pose[0, 3] = rgb_t[0]
+            rgb_pose[1, 3] = rgb_t[1]
+            rgb_pose[2, 3] = rgb_t[2]
+
+            self.depth_images.append(depth_img)
+            self.color_images.append(rgb_img)
+            self.rgb_poses.append(rgb_pose)
+
+            if self.live_integration and self.tsdf_volume is not None:
+                self.integration_done = False
+                try:
+                    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                        rgb_img, depth_img, self.depth_scale, self.depth_trunc, False
+                    )
+                    
+                    self.tsdf_volume.integrate(rgbd, self.intrinsics, np.linalg.inv(rgb_pose)) # TODO: See lookupTransform line
+                    self.integration_done = True
+                    self.processed_frame_count += 1
+                    if self.processed_frame_count % 50 == 0:
+                        mesh = self.tsdf_volume.extract_triangle_mesh()
+                        if self.crop_mesh:
+                            cropped_mesh = mesh.crop(self.crop_box)
                         else:
-                            self.tsdf_integration_data.append([data[0], data[1], rgb_pose])
-                            self.processed_frame_count += 1
-
-                self.frame_count += 1
+                            cropped_mesh = mesh
+                        mesh_msg = meshToRos(cropped_mesh)
+                        mesh_msg.header.stamp = self.get_clock().now().to_msg()
+                        mesh_msg.header.frame_id = self.relative_frame
+                        self.mesh_pub.publish(mesh_msg)
+                except Exception as e:
+                    self.get_logger().error(f"Error processing images into tsdf: {e}")
+                    self.integration_done = True
+                    return
+            else:
+                self.tsdf_integration_data.append([depth_img, rgb_img, rgb_pose])
+                self.processed_frame_count += 1
 
     def cameraInfoCallback(self, camera_info):
         self.intrinsics = getIntrinsicsFromMsg(camera_info)
