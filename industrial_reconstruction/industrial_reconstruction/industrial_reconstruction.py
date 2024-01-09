@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import sys
+import cv2
 import rclpy
 from rclpy.node import Node
 from tf2_ros.buffer import Buffer
@@ -269,7 +270,7 @@ class IndustrialReconstruction(Node):
         mesh_msg.header.stamp = self.get_clock().now().to_msg()
         mesh_msg.header.frame_id = self.relative_frame
         self.mesh_pub.publish(mesh_msg)
-        self.get_logger().info("Mesh Saved to " + req.mesh_filepath)
+        self.get_logger().info(f"Mesh with {len(mesh_msg.points)} points saved to {req.mesh_filepath}")
 
         if (req.archive_directory != ""):
             self.get_logger().info("Archiving data to " + req.archive_directory)
@@ -289,6 +290,9 @@ class IndustrialReconstruction(Node):
                 # TODO: Generalize image type
                 cv2_depth_img = self.bridge.imgmsg_to_cv2(depth_image_msg, "16UC1")
                 cv2_rgb_img = self.bridge.imgmsg_to_cv2(rgb_image_msg, rgb_image_msg.encoding)
+                # TODO: Test this if statement
+                # if len(cv2_rgb_img.shape) == 2 and cv2_rgb_img.dtype is np.uint8:
+                cv2_rgb_img = cv2.cvtColor(cv2_rgb_img, cv2.COLOR_GRAY2RGB)
             except CvBridgeError:
                 self.get_logger().error("Error converting ros msg to cv img")
                 return
@@ -339,8 +343,8 @@ class IndustrialReconstruction(Node):
                                     mesh_msg.header.stamp = self.get_clock().now().to_msg()
                                     mesh_msg.header.frame_id = self.relative_frame
                                     self.mesh_pub.publish(mesh_msg)
-                            except:
-                                self.get_logger().error("Error processing images into tsdf")
+                            except Exception as e:
+                                self.get_logger().error(f"Error processing images into tsdf: {e}")
                                 self.integration_done = True
                                 return
                         else:
