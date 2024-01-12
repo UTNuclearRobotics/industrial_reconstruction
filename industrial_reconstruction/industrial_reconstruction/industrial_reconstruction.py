@@ -17,6 +17,8 @@ import cv2
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from tf2_ros.buffer import Buffer
 from tf2_ros import TransformListener
 import open3d as o3d
@@ -142,7 +144,7 @@ class IndustrialReconstruction(Node):
         self.tsdf_volume_pub = self.create_publisher(Marker, "tsdf_volume", 10)
 
         reconstruct_frequency = 50.0
-        self.reconstruction_timer = self.create_timer(1/reconstruct_frequency, self.reconstructCallback)
+        self.reconstruction_timer = self.create_timer(1/reconstruct_frequency, self.reconstructCallback, callback_group=MutuallyExclusiveCallbackGroup())
 
     def archiveData(self, path_output):
         path_depth = join(path_output, "depth")
@@ -233,7 +235,9 @@ class IndustrialReconstruction(Node):
         self.get_logger().info("Stop Reconstruction")
         self.record = False
 
-        while not self.integration_done:
+        if (len(self.sensor_data) > 0):
+            self.get_logger().info("Waiting for all recorded frames to be processed")
+        while not (self.integration_done and len(self.sensor_data) == 0):
             self.create_rate(1).sleep()
 
         self.get_logger().info("Generating mesh")
@@ -295,9 +299,9 @@ class IndustrialReconstruction(Node):
             # TODO: Generalize image type
             cv2_depth_img = self.bridge.imgmsg_to_cv2(depth_image_msg, "16UC1")
             cv2_rgb_img = self.bridge.imgmsg_to_cv2(rgb_image_msg, rgb_image_msg.encoding)
-            # TODO: Test this if statement
-            # if len(cv2_rgb_img.shape) == 2 and cv2_rgb_img.dtype is np.uint8:
-            cv2_rgb_img = cv2.cvtColor(cv2_rgb_img, cv2.COLOR_GRAY2RGB)
+            # Handle grayscale rgb input (TODO: Test this if statement)
+            if len(cv2_rgb_img.shape) == 2 and cv2_rgb_img.dtype == np.uint8:
+                cv2_rgb_img = cv2.cvtColor(cv2_rgb_img, cv2.COLOR_GRAY2RGB)
 
         except CvBridgeError as e:
             self.get_logger().error(f"Error converting ros msg to cv img: {e}")
@@ -306,7 +310,7 @@ class IndustrialReconstruction(Node):
         # Get the pose of the camera when this image was taken
         try:
             gm_tf_stamped = self.buffer.lookup_transform( # TODO: Why not invert the transform here?
-                self.relative_frame, self.tracking_frame, rgb_image_msg.header.stamp, Duration(seconds=1.0)
+                self.relative_frame, self.tracking_frame, rgb_image_msg.header.stamp, Duration(seconds=5.0)
             )
         except Exception as e:
             self.get_logger().error(f"Failed to get transform: {e}")
@@ -317,7 +321,8 @@ class IndustrialReconstruction(Node):
         self.frame_count += 1
         
     def reconstructCallback(self):
-        if (self.frame_count <= 30): return # TODO: Evaluate necessity of this line
+        if (self.frame_count <= 30 or len(self.sensor_data) == 0): return # TODO: Evaluate necessity of this line
+        self.get_logger().info("Starting integration")
 
         depth_img, rgb_img, gm_tf_stamped = self.sensor_data.popleft()
         rgb_t, rgb_r = transformStampedToVectors(gm_tf_stamped)
@@ -347,9 +352,11 @@ class IndustrialReconstruction(Node):
                     )
                     
                     self.tsdf_volume.integrate(rgbd, self.intrinsics, np.linalg.inv(rgb_pose)) # TODO: See lookupTransform line
+                    self.get_logger().info("Integration complete")
                     self.integration_done = True
                     self.processed_frame_count += 1
-                    if self.processed_frame_count % 50 == 0:
+                    if self.processed_frame_count % 50 == 0 and self.record:
+                        self.get_logger().info("Extracting mesh for visualization")
                         mesh = self.tsdf_volume.extract_triangle_mesh()
                         if self.crop_mesh:
                             cropped_mesh = mesh.crop(self.crop_box)
@@ -374,6 +381,8 @@ class IndustrialReconstruction(Node):
 def main(args=None):
     rclpy.init(args=args)
     industrial_reconstruction = IndustrialReconstruction()
-    rclpy.spin(industrial_reconstruction)
+    executor = MultiThreadedExecutor(3) 
+    executor.add_node(industrial_reconstruction)
+    executor.spin()
     industrial_reconstruction.destroy_node()
     rclpy.shutdown()
