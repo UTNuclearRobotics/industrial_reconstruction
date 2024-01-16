@@ -21,6 +21,8 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from tf2_ros.buffer import Buffer
 from tf2_ros import TransformListener
+from std_srvs.srv import Trigger
+from industrial_reconstruction_msgs.srv import StartReconstruction, StopReconstruction
 import open3d as o3d
 import numpy as np
 
@@ -90,6 +92,7 @@ class IndustrialReconstruction(Node):
         self.tsdf_volume_pub = None
 
         self.record = False
+        self.paused = False
         self.frame_count = 0
         self.processed_frame_count = 0
         self.reconstructed_frame_count = 0
@@ -128,23 +131,30 @@ class IndustrialReconstruction(Node):
 
         self.depth_sub = Subscriber(self, Image, self.depth_image_topic)
         self.color_sub = Subscriber(self, Image, self.color_image_topic)
-        self.tss = ApproximateTimeSynchronizer([self.depth_sub, self.color_sub], self.cache_count, self.slop,
-                                               allow_headerless)
+        self.tss = ApproximateTimeSynchronizer([self.depth_sub, self.color_sub], self.cache_count, self.slop,allow_headerless)
         self.tss.registerCallback(self.cameraCallback)
-
         self.info_sub = self.create_subscription(CameraInfo, self.camera_info_topic, self.cameraInfoCallback, 10)
 
         self.mesh_pub = self.create_publisher(Marker, "industrial_reconstruction_mesh", 10)
-
-        self.start_server = self.create_service(StartReconstruction, 'start_reconstruction',
-                                                self.startReconstructionCallback)
-        self.stop_server = self.create_service(StopReconstruction, 'stop_reconstruction',
-                                               self.stopReconstructionCallback)
-
         self.tsdf_volume_pub = self.create_publisher(Marker, "tsdf_volume", 10)
 
+        service_group = MutuallyExclusiveCallbackGroup()
+        self.start_server = self.create_service(
+            StartReconstruction, 'start_reconstruction', self.startReconstructionCallback, callback_group=service_group
+        )
+        self.stop_server = self.create_service(
+            StopReconstruction , 'stop_reconstruction', self.stopReconstructionCallback, callback_group=service_group
+        )
+        self.pause_server = self.create_service(
+            Trigger, 'pause_reconstruction', self.pauseReconstructionCallback, callback_group=service_group
+        )
+        self.resume_server = self.create_service(
+            Trigger, 'resume_reconstruction', self.resumeReconstructionCallback, callback_group=service_group
+        )
+
         reconstruct_frequency = 50.0
-        self.reconstruction_timer = self.create_timer(1/reconstruct_frequency, self.reconstructCallback, callback_group=MutuallyExclusiveCallbackGroup())
+        reconstruction_group = MutuallyExclusiveCallbackGroup()
+        self.reconstruction_timer = self.create_timer(1/reconstruct_frequency, self.reconstructCallback, callback_group=reconstruction_group)
 
     def archiveData(self, path_output):
         path_depth = join(path_output, "depth")
@@ -164,7 +174,7 @@ class IndustrialReconstruction(Node):
             save_intrinsic_as_json(join(path_output, "camera_intrinsic.json"), self.intrinsics)
 
 
-    def startReconstructionCallback(self, req, res):
+    def startReconstructionCallback(self, req: StartReconstruction.Request, res: StartReconstruction.Response):
         self.get_logger().info(" Start Reconstruction")
 
         self.color_images.clear()
@@ -187,8 +197,8 @@ class IndustrialReconstruction(Node):
                 [req.tsdf_params.max_box_values.x, req.tsdf_params.max_box_values.y, req.tsdf_params.max_box_values.z])
             self.crop_box = o3d.geometry.AxisAlignedBoundingBox(min_bound, max_bound)
 
-            self.crop_box_msg.type = self.crop_box_msg.CUBE
-            self.crop_box_msg.action = self.crop_box_msg.ADD
+            self.crop_box_msg.type = Marker.CUBE
+            self.crop_box_msg.action = Marker.ADD
             self.crop_box_msg.id = 1
             self.crop_box_msg.scale.x = max_bound[0] - min_bound[0]
             self.crop_box_msg.scale.y = max_bound[1] - min_bound[1]
@@ -227,11 +237,39 @@ class IndustrialReconstruction(Node):
 
         self.live_integration = req.live
         self.record = True
+        self.paused = False
 
         res.success = True
         return res
+    
+    def pauseReconstructionCallback(self, req: Trigger.Request, res: Trigger.Response):
+        if not self.record:
+            res.message = "Cannot pause reconstruction that was never started. Doing nothing"
+            res.success = False
+            self.get_logger().warn(res.message)
+            return res
 
-    def stopReconstructionCallback(self, req, res):
+        self.paused = True
+        res.message = "Pausing Reconstruction. "
+        if len(self.sensor_data > 0):
+            res.message += f"Waiting on {len(self.sensor_data)} to finish processing"
+        self.get_logger().info(res.message)
+        return res
+
+    def resumeReconstructionCallback(self, req: Trigger.Request, res: Trigger.Response):
+        if not self.paused:
+            res.message = "Cannot resume reconstruction that was not initially paused. Doing nothing"
+            res.success = False
+            self.get_logger().warn(res.message)
+            return res
+        
+        self.paused = False
+        res.success = True
+        res.message = "Resuming reconstruction"
+        self.get_logger().info(res.message)
+        return res
+
+    def stopReconstructionCallback(self, req: StopReconstruction.Request, res: StopReconstruction.Response):
         self.get_logger().info("Stop Reconstruction")
         self.record = False
 
@@ -292,7 +330,7 @@ class IndustrialReconstruction(Node):
         return res
 
     def cameraCallback(self, depth_image_msg, rgb_image_msg):
-        if not self.record: return
+        if self.paused or not self.record: return
 
         # Convert your ROS Image message to OpenCV2
         try:
@@ -302,7 +340,6 @@ class IndustrialReconstruction(Node):
             # Handle grayscale rgb input (TODO: Test this if statement)
             if len(cv2_rgb_img.shape) == 2 and cv2_rgb_img.dtype == np.uint8:
                 cv2_rgb_img = cv2.cvtColor(cv2_rgb_img, cv2.COLOR_GRAY2RGB)
-
         except CvBridgeError as e:
             self.get_logger().error(f"Error converting ros msg to cv img: {e}")
             return
