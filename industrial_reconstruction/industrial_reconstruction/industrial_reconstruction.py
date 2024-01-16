@@ -19,6 +19,8 @@ from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.parameter import ParameterType
+from rcl_interfaces.msg import ParameterDescriptor
 from tf2_ros.buffer import Buffer
 from tf2_ros import TransformListener
 from std_srvs.srv import Trigger
@@ -97,14 +99,14 @@ class IndustrialReconstruction(Node):
         self.processed_frame_count = 0
         self.reconstructed_frame_count = 0
 
-        self.declare_parameter("depth_image_topic")
-        self.declare_parameter("color_image_topic")
-        self.declare_parameter("camera_info_topic")
+        self.declare_parameter("depth_image_topic", descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING))
+        self.declare_parameter("color_image_topic", descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING))
+        self.declare_parameter("camera_info_topic", descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING))
         self.declare_parameter("cache_count", 10)
         self.declare_parameter("slop", 0.01)
 
         try:
-            self.depth_image_topic = str(self.get_parameter('depth_image_topic').value)
+            self.depth_image_topic = (self.get_parameter('depth_image_topic').value)
         except:
             self.get_logger().error("Failed to load depth_image_topic parameter")
         try:
@@ -131,7 +133,7 @@ class IndustrialReconstruction(Node):
 
         self.depth_sub = Subscriber(self, Image, self.depth_image_topic)
         self.color_sub = Subscriber(self, Image, self.color_image_topic)
-        self.tss = ApproximateTimeSynchronizer([self.depth_sub, self.color_sub], self.cache_count, self.slop,allow_headerless)
+        self.tss = ApproximateTimeSynchronizer([self.depth_sub, self.color_sub], self.cache_count, self.slop, allow_headerless)
         self.tss.registerCallback(self.cameraCallback)
         self.info_sub = self.create_subscription(CameraInfo, self.camera_info_topic, self.cameraInfoCallback, 10)
 
