@@ -99,9 +99,10 @@ class IndustrialReconstruction(Node):
         self.processed_frame_count = 0
         self.reconstructed_frame_count = 0
 
-        self.declare_parameter("depth_image_topic", descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING))
-        self.declare_parameter("color_image_topic", descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING))
-        self.declare_parameter("camera_info_topic", descriptor=ParameterDescriptor(type=ParameterType.PARAMETER_STRING))
+        string_type = ParameterDescriptor(type=ParameterDescriptor.PARAMETER_STRING)
+        self.declare_parameter("depth_image_topic", string_type)
+        self.declare_parameter("color_image_topic", string_type)
+        self.declare_parameter("camera_info_topic", string_type)
         self.declare_parameter("cache_count", 10)
         self.declare_parameter("slop", 0.01)
 
