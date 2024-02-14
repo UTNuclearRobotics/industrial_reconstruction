@@ -27,6 +27,7 @@ from std_srvs.srv import Trigger
 from industrial_reconstruction_msgs.srv import StartReconstruction, StopReconstruction
 import open3d as o3d
 import numpy as np
+from sensor_msgs.msg import PointCloud2, PointField
 
 from pyquaternion import Quaternion
 from collections import deque
@@ -48,6 +49,38 @@ def filterNormals(mesh, direction, angle):
    dot_prods = tri_normals @ direction
    mesh.remove_triangles_by_mask(dot_prods < np.cos(angle))
    return mesh
+
+def to_cloud_msg(frame, points, logger, colors=None, intensities=None, distances=None):
+    msg = PointCloud2()
+    logger.info("1")
+    msg.header.frame_id = frame
+    msg.height = 1
+    msg.width = points.shape[0]
+    logger.info("1.5")
+    msg.is_bigendian = False
+    msg.is_dense = False
+    msg.fields = [
+        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+    ]
+    logger.info("2")
+    msg.point_step = 12
+    data = points
+    if colors is not None:
+        raise NotImplementedError
+    elif intensities is not None:
+        msg.fields.append(PointField("intensity", 12, PointField.FLOAT32, 1))
+        msg.point_step += 4
+        data = np.hstack([points, intensities])
+    elif distances is not None:
+        msg.fields.append(PointField("distance", 12, PointField.FLOAT32, 1))
+        msg.point_step += 4
+        data = np.hstack([points, distances])
+    logger.info("3")
+    msg.row_step = msg.point_step * points.shape[0]
+    msg.data = data.astype(np.float32).tostring()
+    return msg
 
 class IndustrialReconstruction(Node):
 
@@ -139,6 +172,7 @@ class IndustrialReconstruction(Node):
         self.info_sub = self.create_subscription(CameraInfo, self.camera_info_topic, self.cameraInfoCallback, 10)
 
         self.mesh_pub = self.create_publisher(Marker, "industrial_reconstruction_mesh", 10)
+        self.cloud_pub = self.create_publisher(PointCloud2, "tsdf_cloud", 10)
         self.tsdf_volume_pub = self.create_publisher(Marker, "tsdf_volume", 10)
 
         service_group = MutuallyExclusiveCallbackGroup()
@@ -396,16 +430,17 @@ class IndustrialReconstruction(Node):
                     self.integration_done = True
                     self.processed_frame_count += 1
                     if self.processed_frame_count % 50 == 0 and self.record:
-                        self.get_logger().info("Extracting mesh for visualization")
-                        mesh = self.tsdf_volume.extract_triangle_mesh()
-                        if self.crop_mesh:
-                            cropped_mesh = mesh.crop(self.crop_box)
-                        else:
-                            cropped_mesh = mesh
-                        mesh_msg = meshToRos(cropped_mesh)
-                        mesh_msg.header.stamp = self.get_clock().now().to_msg()
-                        mesh_msg.header.frame_id = self.relative_frame
-                        self.mesh_pub.publish(mesh_msg)
+                        self.get_logger().info("Extracting pointcloud for visualization")
+                        cloud = self.tsdf_volume.extract_point_cloud()
+                        if cloud.is_empty():
+                            self.get_logger().warn("It was, indeed, empty")
+                        try:
+                            ros_cloud = to_cloud_msg(frame=self.relative_frame, points=np.asarray(cloud.points), logger=self.get_logger())
+                        except Exception as E:
+                            self.get_logger().warn(f"Error creating cloud: {E}")
+                        self.get_logger().info("Made the cloud")
+                        ros_cloud.header.stamp = self.get_clock().now().to_msg()
+                        self.cloud_pub.publish(ros_cloud)
                 except Exception as e:
                     self.get_logger().error(f"Error processing images into tsdf: {e}")
                     self.integration_done = True
