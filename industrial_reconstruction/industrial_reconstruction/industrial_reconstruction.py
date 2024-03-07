@@ -52,11 +52,9 @@ def filterNormals(mesh, direction, angle):
 
 def to_cloud_msg(frame, points, logger, colors=None, intensities=None, distances=None):
     msg = PointCloud2()
-    logger.info("1")
     msg.header.frame_id = frame
     msg.height = 1
     msg.width = points.shape[0]
-    logger.info("1.5")
     msg.is_bigendian = False
     msg.is_dense = False
     msg.fields = [
@@ -64,20 +62,20 @@ def to_cloud_msg(frame, points, logger, colors=None, intensities=None, distances
         PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
         PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
     ]
-    logger.info("2")
     msg.point_step = 12
     data = points
     if colors is not None:
-        raise NotImplementedError
+        msg.fields.append(PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1))
+        msg.point_step += 4
+        data = np.hstack([data, colors])
     elif intensities is not None:
-        msg.fields.append(PointField("intensity", 12, PointField.FLOAT32, 1))
+        msg.fields.append(PointField(name="intensity", offset=12, datatype=PointField.FLOAT32, count=1))
         msg.point_step += 4
-        data = np.hstack([points, intensities])
+        data = np.hstack([data, intensities])
     elif distances is not None:
-        msg.fields.append(PointField("distance", 12, PointField.FLOAT32, 1))
+        msg.fields.append(PointField(name="distance", offset=12, datatype=PointField.FLOAT32, count=1))
         msg.point_step += 4
-        data = np.hstack([points, distances])
-    logger.info("3")
+        data = np.hstack([data, distances])
     msg.row_step = msg.point_step * points.shape[0]
     msg.data = data.astype(np.float32).tostring()
     return msg
