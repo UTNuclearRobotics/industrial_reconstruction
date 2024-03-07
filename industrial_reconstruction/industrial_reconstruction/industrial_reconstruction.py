@@ -15,6 +15,7 @@
 import sys
 import cv2
 import rclpy
+import struct
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
@@ -67,6 +68,12 @@ def to_cloud_msg(frame, points, logger, colors=None, intensities=None, distances
     if colors is not None:
         msg.fields.append(PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1))
         msg.point_step += 4
+        # Convert from floating point tuple (r,g,b) in range [0, 1] to single integer in range [0 255]
+        tuple_to_int_rgb = lambda c: 65536*int(c[0]*255) + 256*int(255*c[1]) + int(255*c[2])
+        # Packing integer rgb into a float
+        int_to_float_rbg = lambda c: struct.unpack('@f', struct.pack('@I', c))
+
+        colors = np.array([int_to_float_rbg(tuple_to_int_rgb(c)) for c in colors], dtype=np.float32)
         data = np.hstack([data, colors])
     elif intensities is not None:
         msg.fields.append(PointField(name="intensity", offset=12, datatype=PointField.FLOAT32, count=1))
@@ -76,7 +83,7 @@ def to_cloud_msg(frame, points, logger, colors=None, intensities=None, distances
         msg.fields.append(PointField(name="distance", offset=12, datatype=PointField.FLOAT32, count=1))
         msg.point_step += 4
         data = np.hstack([data, distances])
-    msg.row_step = msg.point_step * points.shape[0]
+    msg.row_step = msg.point_step * data.shape[0]
     msg.data = data.astype(np.float32).tostring()
     return msg
 
@@ -433,7 +440,7 @@ class IndustrialReconstruction(Node):
                         if cloud.is_empty():
                             self.get_logger().warn("It was, indeed, empty")
                         try:
-                            ros_cloud = to_cloud_msg(frame=self.relative_frame, points=np.asarray(cloud.points), logger=self.get_logger())
+                            ros_cloud = to_cloud_msg(frame=self.relative_frame, points=np.asarray(cloud.points), logger=self.get_logger(), colors=np.asarray(cloud.colors))
                         except Exception as E:
                             self.get_logger().warn(f"Error creating cloud: {E}")
                         self.get_logger().info("Made the cloud")
