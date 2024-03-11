@@ -331,6 +331,7 @@ class IndustrialReconstruction(Node):
                 rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(data[1], data[0], self.depth_scale, self.depth_trunc,
                                                                           False)
                 self.tsdf_volume.integrate(rgbd, self.intrinsics, np.linalg.inv(data[2]))
+        
         mesh = self.tsdf_volume.extract_triangle_mesh()
         mesh.compute_vertex_normals()
 
@@ -366,9 +367,16 @@ class IndustrialReconstruction(Node):
             archive_mesh_filepath = join(req.archive_directory, "integrated.ply")
             o3d.io.write_triangle_mesh(archive_mesh_filepath, mesh, False, True)
 
+
+        cloud = self.tsdf_volume.extract_point_cloud()
+        if cloud.is_empty():
+            self.get_logger().warn("Point cloud was empty")
+        point_cloud_filepath = join("/".join(req.mesh_filepath.split("/")[:-1]), "integrated_point_cloud.ply")
+        o3d.io.write_point_cloud(point_cloud_filepath, cloud)
+        self.get_logger().info(f"Point cloud with {len(mesh_msg.points)} points saved to {point_cloud_filepath}")
         self.get_logger().info("DONE")
         res.success = True
-        res.message = "Mesh Saved to " + req.mesh_filepath
+        res.message = "Mesh Saved to " + req.mesh_filepath + " and point cloud saved to " + point_cloud_filepath
         return res
 
     def cameraCallback(self, depth_image_msg, rgb_image_msg):
