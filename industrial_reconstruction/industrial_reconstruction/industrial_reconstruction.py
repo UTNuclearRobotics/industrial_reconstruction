@@ -51,7 +51,11 @@ def filterNormals(mesh, direction, angle):
    mesh.remove_triangles_by_mask(dot_prods < np.cos(angle))
    return mesh
 
-def to_cloud_msg(frame, points, logger, colors=None, intensities=None, normals=None):
+def to_cloud_msg(frame, pointcloud: o3d.geometry.PointCloud, logger=None):
+    points  = np.asarray(pointcloud.points)
+    colors  = np.asarray(pointcloud.colors)
+    normals = np.asarray(pointcloud.normals)
+
     msg = PointCloud2()
     msg.header.frame_id = frame
     msg.height = 1
@@ -59,6 +63,8 @@ def to_cloud_msg(frame, points, logger, colors=None, intensities=None, normals=N
     msg.is_bigendian = False
     msg.is_dense = False
     data = points
+    msg.point_step = 0
+    msg.fields = []
 
     def addField(name):
         nonlocal msg
@@ -79,11 +85,7 @@ def to_cloud_msg(frame, points, logger, colors=None, intensities=None, normals=N
         colors = np.array([int_to_float_rbg(tuple_to_int_rgb(c)) for c in colors], dtype=np.float32)
         data = np.hstack([data, colors])
 
-    elif intensities is not None:
-        addField("intensity")
-        data = np.hstack([data, intensities])
-
-    elif normals is not None:
+    if normals is not None:
         addField("normal_x")
         addField("normal_y")
         addField("normal_z")
@@ -415,7 +417,6 @@ class IndustrialReconstruction(Node):
         
     def reconstructCallback(self):
         if (self.frame_count <= 30 or len(self.sensor_data) == 0): return # TODO: Evaluate necessity of this line
-        self.get_logger().info("Starting integration")
 
         depth_img, rgb_img, gm_tf_stamped = self.sensor_data.popleft()
         rgb_t, rgb_r = transformStampedToVectors(gm_tf_stamped)
@@ -445,21 +446,17 @@ class IndustrialReconstruction(Node):
                     )
                     
                     self.tsdf_volume.integrate(rgbd, self.intrinsics, np.linalg.inv(rgb_pose)) # TODO: See lookupTransform line
-                    self.get_logger().info("Integration complete")
                     self.integration_done = True
                     self.processed_frame_count += 1
                     if self.processed_frame_count % 50 == 0 and self.record:
                         self.get_logger().info("Extracting pointcloud for visualization")
                         cloud = self.tsdf_volume.extract_point_cloud()
-                        if cloud.is_empty():
-                            self.get_logger().warn("It was, indeed, empty")
                         try:
-                            ros_cloud = to_cloud_msg(frame=self.relative_frame, points=np.asarray(cloud.points), logger=self.get_logger(), colors=np.asarray(cloud.colors))
+                            ros_cloud = to_cloud_msg(frame=self.relative_frame, pointcloud=cloud, logger=self.get_logger())
+                            ros_cloud.header.stamp = self.get_clock().now().to_msg()
+                            self.cloud_pub.publish(ros_cloud)
                         except Exception as E:
                             self.get_logger().warn(f"Error creating cloud: {E}")
-                        self.get_logger().info("Made the cloud")
-                        ros_cloud.header.stamp = self.get_clock().now().to_msg()
-                        self.cloud_pub.publish(ros_cloud)
                 except Exception as e:
                     self.get_logger().error(f"Error processing images into tsdf: {e}")
                     self.integration_done = True
