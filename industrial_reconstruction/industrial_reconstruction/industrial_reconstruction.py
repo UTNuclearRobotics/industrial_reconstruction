@@ -51,23 +51,26 @@ def filterNormals(mesh, direction, angle):
    mesh.remove_triangles_by_mask(dot_prods < np.cos(angle))
    return mesh
 
-def to_cloud_msg(frame, points, logger, colors=None, intensities=None, distances=None):
+def to_cloud_msg(frame, points, logger, colors=None, intensities=None, normals=None):
     msg = PointCloud2()
     msg.header.frame_id = frame
     msg.height = 1
     msg.width = points.shape[0]
     msg.is_bigendian = False
     msg.is_dense = False
-    msg.fields = [
-        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-    ]
-    msg.point_step = 12
     data = points
-    if colors is not None:
-        msg.fields.append(PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1))
+
+    def addField(name):
+        nonlocal msg
+        msg.fields.append(PointField(name=name, offset=msg.point_step, datatype=PointField.FLOAT32, count=1))
         msg.point_step += 4
+
+    addField("x")
+    addField("y")
+    addField("z")
+
+    if colors is not None:
+        addField("rgb")
         # Convert from floating point tuple (r,g,b) in range [0, 1] to single integer in range [0 255]
         tuple_to_int_rgb = lambda c: 65536*int(c[0]*255) + 256*int(255*c[1]) + int(255*c[2])
         # Packing integer rgb into a float
@@ -75,14 +78,17 @@ def to_cloud_msg(frame, points, logger, colors=None, intensities=None, distances
 
         colors = np.array([int_to_float_rbg(tuple_to_int_rgb(c)) for c in colors], dtype=np.float32)
         data = np.hstack([data, colors])
+
     elif intensities is not None:
-        msg.fields.append(PointField(name="intensity", offset=12, datatype=PointField.FLOAT32, count=1))
-        msg.point_step += 4
+        addField("intensity")
         data = np.hstack([data, intensities])
-    elif distances is not None:
-        msg.fields.append(PointField(name="distance", offset=12, datatype=PointField.FLOAT32, count=1))
-        msg.point_step += 4
-        data = np.hstack([data, distances])
+
+    elif normals is not None:
+        addField("normal_x")
+        addField("normal_y")
+        addField("normal_z")
+        data = np.hstack([data, normals])
+
     msg.row_step = msg.point_step * data.shape[0]
     msg.data = data.astype(np.float32).tostring()
     return msg
